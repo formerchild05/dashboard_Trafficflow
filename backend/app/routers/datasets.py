@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
 from app.db.duckdb_client import DuckDBClient
-from app.schemas import DatasetListResponse, DatasetObjectResponse, DateRangeDataResponse, DayDataResponse, DayRoadCountResponse, LatestLayerDataResponse, LayerDatesResponse, PreviewResponse, RoadComparisonResponse, StatsResponse
+from app.schemas import DatasetListResponse, DatasetObjectResponse, DateRangeDataResponse, DayDataResponse, DayRoadCountResponse, LatestLayerDataResponse, LayerDatesResponse, PreviewResponse, RealtimeLayerDataResponse, RoadComparisonResponse, StatsResponse
 from app.services.gcs_repository import GCSParquetRepository
 
 
@@ -20,6 +20,7 @@ repository = GCSParquetRepository(
 )
 duckdb_client = DuckDBClient(settings.duckdb_path)
 DATE_PART_PATTERN = re.compile(r"(?:^|/)date=(\d{4}-\d{2}-\d{2})(?:/|$)")
+FILE_PART_PATTERN = re.compile(r"part-(\d+)", re.IGNORECASE)
 
 
 def _filter_frame_by_road(frame, road_name: str | None):
@@ -59,6 +60,11 @@ def _extract_object_date(object_name: str) -> date | None:
     if not match:
         return None
     return date.fromisoformat(match.group(1))
+
+
+def _extract_file_part(object_name: str) -> int:
+    match = FILE_PART_PATTERN.search(object_name)
+    return int(match.group(1)) if match else -1
 
 
 def _repository_for_layer(layer: str) -> tuple[str, GCSParquetRepository]:
@@ -143,6 +149,43 @@ def get_day_data(target_date: date = Query(...), road_name: str | None = Query(d
 @router.get("/silver/latest/data", response_model=LatestLayerDataResponse)
 def get_latest_silver_data() -> LatestLayerDataResponse:
     return _get_latest_layer_data("silver")
+
+
+@router.get("/silver/realtime/data", response_model=RealtimeLayerDataResponse)
+def get_realtime_silver_data() -> RealtimeLayerDataResponse:
+    if not settings.gcs_bucket:
+        raise HTTPException(status_code=400, detail="GCS_BUCKET is not configured")
+
+    layer_prefix, layer_repository = _repository_for_layer("silver")
+    object_names = layer_repository.list_parquet_objects()
+    dated_objects = [(object_date, name) for name in object_names if (object_date := _extract_object_date(name)) is not None]
+    if not dated_objects:
+        return RealtimeLayerDataResponse(
+            layer="silver",
+            prefix=layer_prefix,
+            object_count=0,
+            columns=[],
+            row_count=0,
+            rows=[],
+        )
+
+    latest_date = max(object_date for object_date, _ in dated_objects)
+    latest_date_objects = sorted(
+        (name for object_date, name in dated_objects if object_date == latest_date),
+        key=lambda name: (_extract_file_part(name), name),
+    )
+    local_paths = layer_repository.download_many(latest_date_objects)
+    frame = duckdb_client.read_parquet_files(local_paths)
+    return RealtimeLayerDataResponse(
+        layer="silver",
+        prefix=layer_prefix,
+        target_date=latest_date.isoformat(),
+        object_name=None,
+        object_count=len(latest_date_objects),
+        columns=list(frame.columns),
+        row_count=int(len(frame)),
+        rows=frame.to_dict(orient="records"),
+    )
 
 
 @router.get("/silver/dates", response_model=LayerDatesResponse)

@@ -43,6 +43,10 @@ class LatestLayerDataResponse(BaseModel):
     rows: list[dict[str, Any]]
 
 
+class RealtimeLayerDataResponse(LatestLayerDataResponse):
+    object_name: str | None = None
+
+
 class DayRoadCountResponse(BaseModel):
     target_date: str
     unique_roads: int

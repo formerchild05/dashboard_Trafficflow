@@ -25,6 +25,10 @@ export type LatestLayerDataResponse = {
   rows: Record<string, unknown>[];
 };
 
+export type RealtimeLayerDataResponse = LatestLayerDataResponse & {
+  object_name: string | null;
+};
+
 export type LayerDatesResponse = {
   layer: string;
   prefix: string;

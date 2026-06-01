@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchJson, getApiBaseUrl } from "../../lib/api";
-import type { LatestLayerDataResponse, LayerDatesResponse, MapGeometryResponse } from "../../lib/types";
+import type { LatestLayerDataResponse, LayerDatesResponse, MapGeometryResponse, RealtimeLayerDataResponse } from "../../lib/types";
 
 type LoadState = "loading" | "ready" | "error";
+type VisualizationMode = "historical" | "realtime" | "forecast";
+type RealtimeIntervalOption = "3" | "5" | "10" | "15" | "custom";
 
 type DensityRecord = {
   keys: string[];
@@ -170,6 +172,14 @@ function toDensityRecord(row: Record<string, unknown>): DensityRecord {
   };
 }
 
+function latestMinuteFromRows(rows: Record<string, unknown>[]): number | null {
+  const minutes = rows
+    .map(toDensityRecord)
+    .map((record) => record.minute)
+    .filter((minute): minute is number => minute !== null);
+  return minutes.length ? Math.max(...minutes) : null;
+}
+
 function buildDensityByKey(records: DensityRecord[], selectedMinute: number | null): Map<string, FeatureDensity> {
   const buckets = new Map<string, { sum: number; rows: number }>();
   const effectiveMinute = selectedMinute === 1440 ? 1437 : selectedMinute;
@@ -239,6 +249,7 @@ export default function VisualizationPage() {
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<LeafletMap | null>(null);
   const [mapGeometry, setMapGeometry] = useState<MapGeometryResponse | null>(null);
+  const [visualizationMode, setVisualizationMode] = useState<VisualizationMode>("historical");
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState("");
   const [loadedDate, setLoadedDate] = useState("");
@@ -249,6 +260,11 @@ export default function VisualizationPage() {
   const [sliderMinute, setSliderMinute] = useState(0);
   const [submittedMinute, setSubmittedMinute] = useState<number | null>(null);
   const [leafletReady, setLeafletReady] = useState(false);
+  const [lastRealtimeUpdate, setLastRealtimeUpdate] = useState<Date | null>(null);
+  const [realtimeIntervalOption, setRealtimeIntervalOption] = useState<RealtimeIntervalOption>("15");
+  const [customRealtimeIntervalSeconds, setCustomRealtimeIntervalSeconds] = useState(15);
+  const realtimeIntervalSeconds =
+    realtimeIntervalOption === "custom" ? Math.max(3, customRealtimeIntervalSeconds || 3) : Number(realtimeIntervalOption);
 
   useEffect(() => {
     let isCancelled = false;
@@ -327,6 +343,46 @@ export default function VisualizationPage() {
     if (!existingScript) document.body.appendChild(script);
   }, []);
 
+  useEffect(() => {
+    if (visualizationMode !== "realtime") return;
+
+    let isCancelled = false;
+
+    async function loadRealtimeData() {
+      try {
+        setError(null);
+        const apiBase = getApiBaseUrl();
+        const realtimePayload = await fetchJson<RealtimeLayerDataResponse>(`${apiBase}/datasets/silver/realtime/data`);
+        if (isCancelled) return;
+
+        const latestMinute = latestMinuteFromRows(realtimePayload.rows);
+        setPayload(realtimePayload);
+        setLoadedDate(realtimePayload.target_date ?? "");
+        setLastRealtimeUpdate(new Date());
+        if (latestMinute !== null) {
+          const roundedMinute = Math.round(latestMinute / 3) * 3;
+          setSliderMinute(roundedMinute);
+          setSubmittedMinute(roundedMinute);
+        }
+        setDataState("ready");
+      } catch (loadError) {
+        if (!isCancelled) {
+          setDataState("error");
+          setError(loadError instanceof Error ? loadError.message : "Không tải được dữ liệu trực tiếp");
+        }
+      }
+    }
+
+    setDataState("loading");
+    void loadRealtimeData();
+    const intervalId = window.setInterval(() => void loadRealtimeData(), realtimeIntervalSeconds * 1_000);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [realtimeIntervalSeconds, visualizationMode]);
+
   async function handleLoadSelectedDate() {
     if (!selectedDate) return;
     try {
@@ -345,17 +401,25 @@ export default function VisualizationPage() {
     }
   }
 
-  const records = useMemo(() => (payload?.rows ?? []).map(toDensityRecord), [payload?.rows]);
+  function handleModeChange(nextMode: VisualizationMode) {
+    setVisualizationMode(nextMode);
+    setError(null);
+    if (nextMode === "historical") {
+      void handleLoadSelectedDate();
+    }
+  }
+
+  const records = useMemo(() => (visualizationMode === "forecast" ? [] : (payload?.rows ?? []).map(toDensityRecord)), [payload?.rows, visualizationMode]);
   const availableMinutes = useMemo(() => {
     return Array.from(new Set(records.map((record) => record.minute).filter((minute): minute is number => minute !== null).map((minute) => Math.round(minute / 3) * 3))).sort((a, b) => a - b);
   }, [records]);
 
   useEffect(() => {
-    if (availableMinutes.length) {
+    if (visualizationMode === "historical" && availableMinutes.length) {
       setSliderMinute(availableMinutes[0]);
       setSubmittedMinute(availableMinutes[0]);
     }
-  }, [availableMinutes]);
+  }, [availableMinutes, visualizationMode]);
 
   function handleSliderChange(rawValue: string) {
     const roundedMinute = Math.max(0, Math.min(1440, Math.round(Number(rawValue) / 3) * 3));
@@ -442,9 +506,9 @@ export default function VisualizationPage() {
           const dayMaxDensity = properties.dayMaxDensity === null ? "N/A" : formatNumber(Number(properties.dayMaxDensity), 3);
           featureLayer.bindPopup?.(
             `<b>${escapeHtml(String(properties.name ?? "Không tên"))}</b><br>` +
-              `highway: ${escapeHtml(String(properties.highway ?? ""))}<br>` +
-              `avg_density: ${density}<br>` +
-              `day min/max: ${dayMinDensity} / ${dayMaxDensity}<br>` +
+              `Loại đường: ${escapeHtml(String(properties.highway ?? ""))}<br>` +
+              `Mật độ trung bình: ${density}<br>` +
+              `Mật độ bé nhất/cao nhất trong ngày (theo đường): ${dayMinDensity} / ${dayMaxDensity}<br>` +
               `rows: ${formatNumber(Number(properties.rows ?? 0))}`
           );
         },
@@ -459,9 +523,16 @@ export default function VisualizationPage() {
     };
   }, [geoJsonData, leafletReady]);
 
-  const detailText = payload?.target_date
-    ? `Dữ liệu mới nhất của ngày ${payload.target_date}`
-    : "Chưa có dữ liệu silver để hiển thị trên bản đồ.";
+  const detailText =
+    visualizationMode === "forecast"
+      ? "Chế độ dự đoán lưu lượng đang được chuẩn bị."
+      : visualizationMode === "realtime"
+        ? payload?.target_date
+          ? `Dữ liệu trực tiếp ngày ${payload.target_date}, tự động cập nhật mỗi 15 giây từ toàn bộ parquet của ngày mới nhất.`
+          : "Đang tải dữ liệu trực tiếp mới nhất."
+        : payload?.target_date
+          ? `Dữ liệu quá khứ của ngày ${payload.target_date}.`
+          : "Chưa có dữ liệu silver để hiển thị trên bản đồ.";
 
   return (
     <main className="page-shell visualization-page">
@@ -476,6 +547,17 @@ export default function VisualizationPage() {
 
         <section className="visualization-controls light-card">
           <label className="date-field">
+            <span>Loại dữ liệu</span>
+            <select value={visualizationMode} onChange={(event) => handleModeChange(event.target.value as VisualizationMode)}>
+              <option value="historical">Lưu lượng quá khứ</option>
+              <option value="realtime">Lưu lượng trực tiếp</option>
+              <option value="forecast">Dự đoán lưu lượng</option>
+            </select>
+          </label>
+
+          {visualizationMode === "historical" ? (
+            <>
+          <label className="date-field">
             <span>Ngày dữ liệu</span>
             <select value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} disabled={dataState === "loading" || !dates.length}>
               {dates.map((date) => (
@@ -488,8 +570,10 @@ export default function VisualizationPage() {
           <button type="button" className="submit-button" onClick={() => void handleLoadSelectedDate()} disabled={!selectedDate || dataState === "loading"}>
             {dataState === "loading" ? "Đang tải..." : "Load ngày"}
           </button>
+            </>
+          ) : null}
 
-          {dataState === "ready" && loadedDate ? (
+          {visualizationMode === "historical" && dataState === "ready" && loadedDate ? (
             <label className="time-slider-field">
               <div className="time-slider-body">
                 <span>Thời điểm trong ngày</span>
@@ -505,6 +589,35 @@ export default function VisualizationPage() {
               </div>
             </label>
           ) : null}
+
+          {visualizationMode === "realtime" ? (
+            <div className="visualization-live-status">
+              <strong>{dataState === "loading" ? "Đang tải dữ liệu trực tiếp..." : `Mốc mới nhất của dữ liệu: ${minuteToTimeInput(sliderMinute)}`}</strong>
+              <span>{lastRealtimeUpdate ? `Cập nhật: ${lastRealtimeUpdate.toLocaleTimeString("vi-VN")}` : "Chưa có lần cập nhật nào"}</span>
+              <label className="realtime-interval-field">
+                <span>Chu kỳ cập nhật</span>
+                <select value={realtimeIntervalOption} onChange={(event) => setRealtimeIntervalOption(event.target.value as RealtimeIntervalOption)}>
+                  <option value="3">3 giây</option>
+                  <option value="5">5 giây</option>
+                  <option value="10">10 giây</option>
+                  <option value="15">15 giây</option>
+                  <option value="custom">Tùy chọn</option>
+                </select>
+                {realtimeIntervalOption === "custom" ? (
+                  <input
+                    type="number"
+                    min={3}
+                    step={1}
+                    value={customRealtimeIntervalSeconds}
+                    onChange={(event) => setCustomRealtimeIntervalSeconds(Math.max(3, Number(event.target.value) || 3))}
+                  />
+                ) : null}
+                <small>Đang cập nhật mỗi {realtimeIntervalSeconds} giây. Tối thiểu 3 giây.</small>
+              </label>
+            </div>
+          ) : null}
+
+          {visualizationMode === "forecast" ? <div className="visualization-live-status">Chức năng dự đoán lưu lượng chưa được triển khai.</div> : null}
         </section>
 
         {error ? <div className="error-box visualization-error">{error}</div> : null}
