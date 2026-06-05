@@ -63,6 +63,8 @@ class GCSParquetRepository:
     def download_object(self, object_name: str) -> Path:
         safe_name = object_name.replace("/", "__")
         local_path = self.cache_dir / safe_name
+        if local_path.exists():
+            return local_path
 
         bucket = self.client.bucket(self.bucket_name)
         blob = bucket.blob(object_name)

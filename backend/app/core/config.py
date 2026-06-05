@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 MAPS_DIR = BASE_DIR / "app" / "utils" / "maps"
+ML_ARTIFACTS_DIR = BASE_DIR / "app" / "ml" / "artifacts"
 load_dotenv(BASE_DIR / ".env")
 
 
@@ -44,6 +45,12 @@ class Settings:
     )
     nghia_do_osm_xml_path: Path = field(
         default_factory=lambda: _path_from_env("NGHIA_DO_OSM_XML_PATH", MAPS_DIR / "nghia_do_cut.osm.xml")
+    )
+    modelai_model_dir: Path = field(
+        default_factory=lambda: _path_from_env("MODELAI_MODEL_DIR", ML_ARTIFACTS_DIR / "modelai_final")
+    )
+    modelai_preprocess_dir: Path = field(
+        default_factory=lambda: _path_from_env("MODELAI_PREPROCESS_DIR", ML_ARTIFACTS_DIR / "preprocessing_state")
     )
 
 

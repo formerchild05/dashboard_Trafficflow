@@ -3,11 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchJson, getApiBaseUrl } from "../../lib/api";
-import type { LatestLayerDataResponse, LayerDatesResponse, MapGeometryResponse, RealtimeLayerDataResponse } from "../../lib/types";
+import type { ForecastLayerResponse, ForecastStatusResponse, LatestLayerDataResponse, LayerDatesResponse, MapGeometryResponse, RealtimeLayerDataResponse } from "../../lib/types";
 
 type LoadState = "loading" | "ready" | "error";
 type VisualizationMode = "historical" | "realtime" | "forecast";
 type RealtimeIntervalOption = "3" | "5" | "10" | "15" | "custom";
+type ForecastHorizonOption = "30" | "60" | "180" | "360" | "720" | "1440" | "custom";
 
 type DensityRecord = {
   keys: string[];
@@ -123,6 +124,32 @@ function minuteToTimeInput(minute: number): string {
   const hours = Math.floor(safeMinute / 60);
   const minutes = safeMinute % 60;
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function dateInputValue(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+function addMinutes(value: Date, minutes: number): Date {
+  return new Date(value.getTime() + minutes * 60_000);
+}
+
+function dateAtMinute(dateText: string, minute: number): Date {
+  const [year, month, day] = dateText.split("-").map(Number);
+  const safeMinute = Math.max(0, Math.min(1435, Math.round(minute / 5) * 5));
+  return new Date(year, (month || 1) - 1, day || 1, Math.floor(safeMinute / 60), safeMinute % 60, 0, 0);
+}
+
+function toApiDateTime(value: Date): string {
+  return `${dateInputValue(value)}T${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}:00`;
+}
+
+function minuteOfDay(value: Date): number {
+  return value.getHours() * 60 + value.getMinutes();
+}
+
+function forecastStepMinutes(option: ForecastHorizonOption): number {
+  return option === "custom" ? 5 : Number(option);
 }
 
 function colorForDensity(value: number | null, minDensity: number, maxDensity: number): string {
@@ -263,6 +290,12 @@ export default function VisualizationPage() {
   const [lastRealtimeUpdate, setLastRealtimeUpdate] = useState<Date | null>(null);
   const [realtimeIntervalOption, setRealtimeIntervalOption] = useState<RealtimeIntervalOption>("15");
   const [customRealtimeIntervalSeconds, setCustomRealtimeIntervalSeconds] = useState(15);
+  const [forecastStatus, setForecastStatus] = useState<ForecastStatusResponse | null>(null);
+  const [forecastRows, setForecastRows] = useState<Record<string, unknown>[]>([]);
+  const [forecastHorizonOption, setForecastHorizonOption] = useState<ForecastHorizonOption>("60");
+  const [forecastDate, setForecastDate] = useState("");
+  const [forecastMinute, setForecastMinute] = useState(0);
+  const [submittedForecast, setSubmittedForecast] = useState<ForecastLayerResponse | null>(null);
   const realtimeIntervalSeconds =
     realtimeIntervalOption === "custom" ? Math.max(3, customRealtimeIntervalSeconds || 3) : Number(realtimeIntervalOption);
 
@@ -383,6 +416,60 @@ export default function VisualizationPage() {
     };
   }, [realtimeIntervalSeconds, visualizationMode]);
 
+  async function loadForecastStatus() {
+    const apiBase = getApiBaseUrl();
+    setDataState("loading");
+    setError(null);
+    const statusPayload = await fetchJson<ForecastStatusResponse>(`${apiBase}/predictions/modelai-final/silver/forecast/status`);
+    setForecastStatus(statusPayload);
+
+    if (statusPayload.anchor_datetime) {
+      const anchor = new Date(statusPayload.anchor_datetime);
+      const defaultTarget = addMinutes(anchor, 60);
+      setForecastDate(dateInputValue(defaultTarget));
+      setForecastMinute(Math.round(minuteOfDay(defaultTarget) / 5) * 5);
+    }
+
+    if (statusPayload.latest_date && payload?.target_date !== statusPayload.latest_date) {
+      const dayPayload = await fetchJson<LatestLayerDataResponse>(`${apiBase}/datasets/silver/by-date/data?target_date=${encodeURIComponent(statusPayload.latest_date)}`);
+      setPayload(dayPayload);
+      setLoadedDate(statusPayload.latest_date);
+    }
+
+    setDataState("ready");
+  }
+
+  function applyForecastHorizon(rawMinutes: string) {
+    setForecastHorizonOption(rawMinutes as ForecastHorizonOption);
+    if (rawMinutes === "custom" || !forecastStatus?.anchor_datetime) return;
+    const target = addMinutes(new Date(forecastStatus.anchor_datetime), Number(rawMinutes));
+    setForecastDate(dateInputValue(target));
+    setForecastMinute(Math.round(minuteOfDay(target) / 5) * 5);
+  }
+
+  async function handleSubmitForecast() {
+    if (!forecastStatus?.anchor_datetime || !forecastDate) return;
+    try {
+      setError(null);
+      setDataState("loading");
+      const target = dateAtMinute(forecastDate, forecastMinute);
+      const stepMinutes = forecastStepMinutes(forecastHorizonOption);
+      const apiBase = getApiBaseUrl();
+      const forecastPayload = await fetchJson<ForecastLayerResponse>(
+        `${apiBase}/predictions/modelai-final/silver/forecast?target_datetime=${encodeURIComponent(toApiDateTime(target))}&step_minutes=${stepMinutes}`
+      );
+      setForecastRows(forecastPayload.rows);
+      setSubmittedForecast(forecastPayload);
+      setSubmittedMinute(null);
+      setDataState("ready");
+    } catch (loadError) {
+      setForecastRows([]);
+      setSubmittedForecast(null);
+      setDataState("error");
+      setError(loadError instanceof Error ? loadError.message : "Khong tai duoc du lieu du doan");
+    }
+  }
+
   async function handleLoadSelectedDate() {
     if (!selectedDate) return;
     try {
@@ -406,10 +493,13 @@ export default function VisualizationPage() {
     setError(null);
     if (nextMode === "historical") {
       void handleLoadSelectedDate();
+    } else if (nextMode === "forecast") {
+      void loadForecastStatus();
     }
   }
 
-  const records = useMemo(() => (visualizationMode === "forecast" ? [] : (payload?.rows ?? []).map(toDensityRecord)), [payload?.rows, visualizationMode]);
+  const rangeRecords = useMemo(() => (payload?.rows ?? []).map(toDensityRecord), [payload?.rows]);
+  const records = useMemo(() => (visualizationMode === "forecast" ? forecastRows.map(toDensityRecord) : rangeRecords), [forecastRows, rangeRecords, visualizationMode]);
   const availableMinutes = useMemo(() => {
     return Array.from(new Set(records.map((record) => record.minute).filter((minute): minute is number => minute !== null).map((minute) => Math.round(minute / 3) * 3))).sort((a, b) => a - b);
   }, [records]);
@@ -428,7 +518,7 @@ export default function VisualizationPage() {
   }
 
   const densityByKey = useMemo(() => buildDensityByKey(records, submittedMinute), [records, submittedMinute]);
-  const dailyDensityRangeByKey = useMemo(() => buildDailyDensityRangeByKey(records), [records]);
+  const dailyDensityRangeByKey = useMemo(() => buildDailyDensityRangeByKey(rangeRecords), [rangeRecords]);
   const selectedMaxDensity = useMemo(() => {
     const values = Array.from(densityByKey.values()).map((item) => item.density);
     return values.length ? Math.max(...values) : 0;
@@ -525,7 +615,9 @@ export default function VisualizationPage() {
 
   const detailText =
     visualizationMode === "forecast"
-      ? "Chế độ dự đoán lưu lượng đang được chuẩn bị."
+      ? forecastStatus?.anchor_datetime
+        ? `Dự đoán từ mốc dữ liệu mới nhất ${forecastStatus.anchor_datetime}.`
+        : "Chọn mốc thời gian trong 3 ngày tới để dự đoán mật độ giao thông."
       : visualizationMode === "realtime"
         ? payload?.target_date
           ? `Dữ liệu trực tiếp ngày ${payload.target_date}, tự động cập nhật mỗi 15 giây từ toàn bộ parquet của ngày mới nhất.`
@@ -533,6 +625,12 @@ export default function VisualizationPage() {
         : payload?.target_date
           ? `Dữ liệu quá khứ của ngày ${payload.target_date}.`
           : "Chưa có dữ liệu silver để hiển thị trên bản đồ.";
+
+  const forecastAnchorDate = forecastStatus?.anchor_datetime ? new Date(forecastStatus.anchor_datetime) : null;
+  const forecastMaxDate = forecastStatus?.max_forecast_datetime ? new Date(forecastStatus.max_forecast_datetime) : null;
+  const forecastTargetDate = forecastDate ? dateAtMinute(forecastDate, forecastMinute) : null;
+  const isForecastTargetValid =
+    Boolean(forecastTargetDate && forecastAnchorDate && forecastMaxDate && forecastTargetDate > forecastAnchorDate && forecastTargetDate <= forecastMaxDate);
 
   return (
     <main className="page-shell visualization-page">
@@ -617,7 +715,75 @@ export default function VisualizationPage() {
             </div>
           ) : null}
 
-          {visualizationMode === "forecast" ? <div className="visualization-live-status">Chức năng dự đoán lưu lượng chưa được triển khai.</div> : null}
+          {visualizationMode === "forecast" ? (
+            <div className="visualization-live-status forecast-controls">
+              <strong>
+                {forecastStatus?.anchor_datetime
+                  ? `Dữ liệu mới nhất: ${forecastStatus.latest_date ?? "--"} (${forecastStatus.anchor_datetime})`
+                  : dataState === "loading"
+                    ? "Đang đọc mốc dữ liệu mới nhất..."
+                    : "Chưa có mốc dữ liệu mới nhất"}
+              </strong>
+              {forecastStatus?.max_forecast_datetime ? <span>Giới hạn dự đoán: {forecastStatus.max_forecast_datetime}</span> : null}
+              <label className="forecast-field">
+                <span>Mốc nhanh</span>
+                <select value={forecastHorizonOption} onChange={(event) => applyForecastHorizon(event.target.value)}>
+                  <option value="30">30 phút</option>
+                  <option value="60">1 giờ</option>
+                  <option value="180">3 giờ</option>
+                  <option value="360">6 giờ</option>
+                  <option value="720">12 giờ</option>
+                  <option value="1440">1 ngày</option>
+                  <option value="custom">Tùy chọn</option>
+                </select>
+              </label>
+              {forecastHorizonOption === "custom" ? (
+                <>
+                  <label className="date-field forecast-field">
+                    <span>Ngày dự đoán</span>
+                    <input
+                      type="date"
+                      value={forecastDate}
+                      min={forecastAnchorDate ? dateInputValue(forecastAnchorDate) : undefined}
+                      max={forecastMaxDate ? dateInputValue(forecastMaxDate) : undefined}
+                      onChange={(event) => setForecastDate(event.target.value)}
+                      disabled={!forecastStatus?.anchor_datetime || dataState === "loading"}
+                    />
+                  </label>
+                  <label className="time-slider-field">
+                    <div className="time-slider-body">
+                      <span>Thời điểm trong ngày dự đoán</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1435}
+                        step={5}
+                        value={forecastMinute}
+                        onChange={(event) => setForecastMinute(Math.max(0, Math.min(1435, Math.round(Number(event.target.value) / 5) * 5)))}
+                        disabled={!forecastStatus?.anchor_datetime || dataState === "loading"}
+                      />
+                      <strong>{minuteToTimeInput(forecastMinute)}</strong>
+                      <div className="time-slider-scale">
+                        <span>0h</span>
+                        <span>6h</span>
+                        <span>12h</span>
+                        <span>18h</span>
+                        <span>24h</span>
+                      </div>
+                    </div>
+                  </label>
+                </>
+              ) : null}
+              <button type="button" className="submit-button" onClick={() => void handleSubmitForecast()} disabled={!isForecastTargetValid || dataState === "loading"}>
+                {dataState === "loading" ? "Đang dự đoán..." : "Submit dự đoán"}
+              </button>
+              {submittedForecast ? (
+                <small>
+                  Đã vẽ dự đoán {submittedForecast.forecast_datetime}, horizon {formatNumber(submittedForecast.horizon_minutes)} phút.
+                </small>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         {error ? <div className="error-box visualization-error">{error}</div> : null}

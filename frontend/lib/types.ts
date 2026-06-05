@@ -29,6 +29,31 @@ export type RealtimeLayerDataResponse = LatestLayerDataResponse & {
   object_name: string | null;
 };
 
+export type ForecastStatusResponse = {
+  layer: string;
+  prefix: string;
+  latest_date: string | null;
+  anchor_datetime: string | null;
+  max_forecast_datetime: string | null;
+  object_count: number;
+  row_count: number;
+  step_minutes: number;
+  max_days: number;
+};
+
+export type ForecastLayerResponse = {
+  layer: string;
+  prefix: string;
+  latest_date: string | null;
+  anchor_datetime: string | null;
+  forecast_datetime: string;
+  horizon_minutes: number;
+  object_count: number;
+  row_count: number;
+  weights?: Record<string, number>;
+  rows: Record<string, unknown>[];
+};
+
 export type LayerDatesResponse = {
   layer: string;
   prefix: string;
