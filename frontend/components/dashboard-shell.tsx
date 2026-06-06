@@ -171,6 +171,9 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
   const [loadingData, setLoadingData] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoveredHour, setHoveredHour] = useState<number | null>(null);
+  const [showFlowSeries, setShowFlowSeries] = useState(true);
+  const [showSpeedSeries, setShowSpeedSeries] = useState(true);
+  const [showTemperatureSeries, setShowTemperatureSeries] = useState(true);
   const [rawPage, setRawPage] = useState(1);
   const [rawPageInput, setRawPageInput] = useState("1");
 
@@ -312,6 +315,15 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
     return null;
   }
 
+  function getWindSpeedValue(row: Record<string, unknown>): number | null {
+    const candidates: unknown[] = [row.wind_speed, row.windSpeed, row.windspeed, row.wind, row.wind_kmh, row.windSpeedKmh];
+    for (const candidate of candidates) {
+      const parsed = toNumber(candidate);
+      if (parsed !== null) return parsed;
+    }
+    return null;
+  }
+
   function getWeatherLabel(row: Record<string, unknown>): string | null {
     const candidates: unknown[] = [row.weather, row.condition, row.weather_label, row.weatherLabel];
     for (const candidate of candidates) {
@@ -321,8 +333,6 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
     }
     return null;
   }
-
-  
 
   const sortedRawRows = useMemo<Record<string, unknown>[]>(() => {
     if (!rawSortKey) {
@@ -540,15 +550,91 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
     return hourlyAvgSpeedSeries.reduce((m, v) => (v > m ? v : m), 0);
   }, [hourlyAvgSpeedSeries]);
 
+  const hourlyWeatherSeries = useMemo(() => {
+    const BUCKETS_PER_DAY = 24 * 60 / 3;
+    const sumTemp: number[] = Array.from({ length: BUCKETS_PER_DAY }, () => 0);
+    const countTemp: number[] = Array.from({ length: BUCKETS_PER_DAY }, () => 0);
+    const sumWind: number[] = Array.from({ length: BUCKETS_PER_DAY }, () => 0);
+    const countWind: number[] = Array.from({ length: BUCKETS_PER_DAY }, () => 0);
+    const sumPrecipitation: number[] = Array.from({ length: BUCKETS_PER_DAY }, () => 0);
+    const countPrecipitation: number[] = Array.from({ length: BUCKETS_PER_DAY }, () => 0);
+    const weatherCounts: Map<string, number>[] = Array.from({ length: BUCKETS_PER_DAY }, () => new Map<string, number>());
+
+    for (const row of rowsForAggregation) {
+      const bucket = getHour(row);
+      if (bucket === null || bucket < 0 || bucket >= BUCKETS_PER_DAY) continue;
+
+      const temperature = getTemperatureValue(row);
+      if (temperature !== null) {
+        sumTemp[bucket] += temperature;
+        countTemp[bucket] += 1;
+      }
+
+      const windSpeed = getWindSpeedValue(row);
+      if (windSpeed !== null) {
+        sumWind[bucket] += windSpeed;
+        countWind[bucket] += 1;
+      }
+
+      const precipitation = getPrecipitationValue(row);
+      if (precipitation !== null) {
+        sumPrecipitation[bucket] += precipitation;
+        countPrecipitation[bucket] += 1;
+      }
+
+      const weather = getWeatherLabel(row);
+      if (weather) {
+        const key = weather.trim();
+        weatherCounts[bucket].set(key, (weatherCounts[bucket].get(key) ?? 0) + 1);
+      }
+    }
+
+    return sumTemp.map((_, bucket) => {
+      let dominantWeather: string | null = null;
+      let dominantCount = 0;
+      for (const [weather, count] of weatherCounts[bucket].entries()) {
+        if (count > dominantCount) {
+          dominantWeather = weather;
+          dominantCount = count;
+        }
+      }
+
+      return {
+        bucket,
+        temperature: countTemp[bucket] > 0 ? sumTemp[bucket] / countTemp[bucket] : null,
+        weather: dominantWeather,
+        windSpeed: countWind[bucket] > 0 ? sumWind[bucket] / countWind[bucket] : null,
+        precipitation: countPrecipitation[bucket] > 0 ? sumPrecipitation[bucket] / countPrecipitation[bucket] : null,
+      };
+    });
+  }, [rowsForAggregation]);
+
+  const maxTemperature = useMemo(() => {
+    return hourlyWeatherSeries.reduce((maxValue, item) => (item.temperature !== null && item.temperature > maxValue ? item.temperature : maxValue), 0);
+  }, [hourlyWeatherSeries]);
+
+  const secondaryAxisMax = useMemo(() => {
+    return Math.max(maxAvgSpeed, maxTemperature, 1);
+  }, [maxAvgSpeed, maxTemperature]);
+
   const hourlySpeedPlot = useMemo(() => {
     const BUCKETS_PER_DAY = hourlyAvgSpeedSeries.length;
-    const safeMaxSpeed = maxAvgSpeed > 0 ? maxAvgSpeed : 1;
     return hourlyAvgSpeedSeries.map((value: number, bucket: number) => {
       const x = chartGeometry.marginLeft + (bucket / (BUCKETS_PER_DAY - 1)) * chartGeometry.plotWidth;
-      const ySpeed = chartGeometry.marginTop + chartGeometry.plotHeight - (value / safeMaxSpeed) * chartGeometry.plotHeight;
+      const ySpeed = chartGeometry.marginTop + chartGeometry.plotHeight - (value / secondaryAxisMax) * chartGeometry.plotHeight;
       return { bucket, value, x, ySpeed };
     });
-  }, [chartGeometry.marginLeft, chartGeometry.marginTop, chartGeometry.plotHeight, chartGeometry.plotWidth, hourlyAvgSpeedSeries, maxAvgSpeed]);
+  }, [chartGeometry.marginLeft, chartGeometry.marginTop, chartGeometry.plotHeight, chartGeometry.plotWidth, hourlyAvgSpeedSeries, secondaryAxisMax]);
+
+  const hourlyTemperaturePlot = useMemo(() => {
+    const BUCKETS_PER_DAY = hourlyWeatherSeries.length;
+    return hourlyWeatherSeries.map((item) => {
+      const value = item.temperature ?? 0;
+      const x = chartGeometry.marginLeft + (item.bucket / (BUCKETS_PER_DAY - 1)) * chartGeometry.plotWidth;
+      const yTemperature = chartGeometry.marginTop + chartGeometry.plotHeight - (value / secondaryAxisMax) * chartGeometry.plotHeight;
+      return { bucket: item.bucket, value, x, yTemperature };
+    });
+  }, [chartGeometry.marginLeft, chartGeometry.marginTop, chartGeometry.plotHeight, chartGeometry.plotWidth, hourlyWeatherSeries, secondaryAxisMax]);
 
   const hourlyFlowPoints = useMemo<string>(() => {
     return hourlyFlowPlot.map((point: { bucket: number; value: number; x: number; y: number }) => `${point.x},${point.y}`).join(" ");
@@ -577,7 +663,7 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoveredMouse, setHoveredMouse] = useState<{ x: number; y: number } | null>(null);
 
-  const hasFlowData = maxHourlyFlow > 0;
+  const hasChartData = maxHourlyFlow > 0 || maxAvgSpeed > 0 || maxTemperature > 0;
 
   function toggleRoadSort(_column: string) {
     // road summary removed
@@ -769,11 +855,37 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
 
         <section className="table-card light-card">
           <h2 className="section-title light-section-title">lưu lượng trong ngày</h2>
-          {hasFlowData ? (
+          {hasChartData ? (
             <div className="flow-chart-wrap">
               <div className="flow-chart-meta">
                 <span>{isTodaySelected ? "Từ 00:00 đến hiện tại" : "Từ 00:00 đến 24:00"}</span>
                 <strong>Max khung 3-phút: {formatNumber(maxHourlyFlow)}</strong>
+                <div className="chart-series-filter" aria-label="Chọn dữ liệu hiển thị trên biểu đồ">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={showFlowSeries}
+                      onChange={(event) => setShowFlowSeries(event.target.checked)}
+                    />
+                    <span>Lưu lượng</span>
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={showSpeedSeries}
+                      onChange={(event) => setShowSpeedSeries(event.target.checked)}
+                    />
+                    <span>Tốc độ</span>
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={showTemperatureSeries}
+                      onChange={(event) => setShowTemperatureSeries(event.target.checked)}
+                    />
+                    <span>Nhiệt độ</span>
+                  </label>
+                </div>
               </div>
               <div className="flow-chart-grid">
                 <svg
@@ -866,16 +978,20 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
                       </text>
                     );
                   })}
-                  <text className="flow-axis-title" x={18} y={chartGeometry.marginTop + chartGeometry.plotHeight / 2} transform={`rotate(-90 18 ${chartGeometry.marginTop + chartGeometry.plotHeight / 2})`}>
-                    Flow (xe/3 phút)
-                  </text>
-                  <polyline className="flow-chart-line" points={hourlyFlowPoints} />
-                  <polyline className="speed-chart-line" points={hourlySpeedPlot.map((p) => `${p.x},${p.ySpeed}`).join(" ")} />
-                  {/* Right-side speed axis */}
-                  {[1, 0.75, 0.5, 0.25, 0].map((ratio, index) => {
-                    const safeMaxSpeed = maxAvgSpeed > 0 ? maxAvgSpeed : 1;
+                  {showFlowSeries ? (
+                    <>
+                      <text className="flow-axis-title" x={18} y={chartGeometry.marginTop + chartGeometry.plotHeight / 2} transform={`rotate(-90 18 ${chartGeometry.marginTop + chartGeometry.plotHeight / 2})`}>
+                        Flow (xe/3 phút)
+                      </text>
+                      <polyline className="flow-chart-line" points={hourlyFlowPoints} />
+                    </>
+                  ) : null}
+                  {showSpeedSeries ? <polyline className="speed-chart-line" points={hourlySpeedPlot.map((p) => `${p.x},${p.ySpeed}`).join(" ")} /> : null}
+                  {showTemperatureSeries ? <polyline className="temperature-chart-line" points={hourlyTemperaturePlot.map((p) => `${p.x},${p.yTemperature}`).join(" ")} /> : null}
+                  {/* Right-side secondary axis for speed and temperature. */}
+                  {showSpeedSeries || showTemperatureSeries ? [1, 0.75, 0.5, 0.25, 0].map((ratio, index) => {
                     const y = chartGeometry.marginTop + (index / 4) * chartGeometry.plotHeight;
-                    const label = Math.round(safeMaxSpeed * ratio);
+                    const label = Math.round(secondaryAxisMax * ratio);
                     return (
                       <g key={`y2-tick-${index}`}>
                         <text className="flow-axis-label" x={chartGeometry.width - chartGeometry.marginRight + 10} y={y + 4} textAnchor="start">
@@ -883,15 +999,13 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
                         </text>
                       </g>
                     );
-                  })}
-                  <text className="flow-axis-label" x={chartGeometry.width - chartGeometry.marginRight + 10} y={chartGeometry.marginTop - 6} textAnchor="start">
-                    km/h
-                  </text>
+                  }) : null}
+                  {showSpeedSeries || showTemperatureSeries ? (
+                    <text className="flow-axis-label" x={chartGeometry.width - chartGeometry.marginRight + 10} y={chartGeometry.marginTop - 6} textAnchor="start">
+                      {showSpeedSeries && showTemperatureSeries ? "km/h / °C" : showSpeedSeries ? "km/h" : "°C"}
+                    </text>
+                  ) : null}
                 </svg>
-                <div className="chart-legend">
-                  <div className="legend-item"><span className="legend-swatch flow"/> Lưu lượng (xe/3ph)</div>
-                  <div className="legend-item"><span className="legend-swatch speed"/> Tốc độ TB (km/h)</div>
-                </div>
                 {hoveredPoint && hoveredMouse ? (
                   <div
                     className={`flow-tooltip ${hoveredMouse.y < 120 ? "below" : "above"}`}
@@ -901,12 +1015,35 @@ export default function DashboardShell({ apiBaseUrl }: DashboardShellProps) {
                     }}
                   >
                     <strong>{formatBucketTime(hoveredPoint.bucket)}</strong>
-                    <span>Flow: {formatNumber(hoveredPoint.value)} xe/3 phút</span>
-                    <span style={{ color: "#ef4444" }}>
-                      Tốc độ TB: {hourlyAvgSpeedSeries?.[hoveredPoint.bucket] && hourlyAvgSpeedSeries[hoveredPoint.bucket] > 0 ? `${formatNumber(hourlyAvgSpeedSeries[hoveredPoint.bucket], 1)} km/h` : "N/A"}
-                    </span>
+                    {showFlowSeries ? <span>Flow: {formatNumber(hoveredPoint.value)} xe/3 phút</span> : null}
+                    {showSpeedSeries ? (
+                      <span style={{ color: "#ef4444" }}>
+                        Tốc độ TB: {hourlyAvgSpeedSeries?.[hoveredPoint.bucket] && hourlyAvgSpeedSeries[hoveredPoint.bucket] > 0 ? `${formatNumber(hourlyAvgSpeedSeries[hoveredPoint.bucket], 1)} km/h` : "N/A"}
+                      </span>
+                    ) : null}
+                    {showTemperatureSeries ? (
+                      <>
+                        <span style={{ color: "#f59e0b" }}>
+                          Nhiệt độ: {hourlyWeatherSeries[hoveredPoint.bucket]?.temperature !== null ? `${formatNumber(hourlyWeatherSeries[hoveredPoint.bucket].temperature, 1)} °C` : "N/A"}
+                        </span>
+                        <span>Weather: {hourlyWeatherSeries[hoveredPoint.bucket]?.weather ?? "N/A"}</span>
+                        <span>
+                          Tốc độ gió: {hourlyWeatherSeries[hoveredPoint.bucket]?.windSpeed !== null ? `${formatNumber(hourlyWeatherSeries[hoveredPoint.bucket].windSpeed, 1)} km/h` : "N/A"}
+                        </span>
+                        {hourlyWeatherSeries[hoveredPoint.bucket]?.weather?.toLowerCase().includes("rain") || hourlyWeatherSeries[hoveredPoint.bucket]?.weather?.toLowerCase().includes("mưa") ? (
+                          <span>
+                            Lượng mưa: {hourlyWeatherSeries[hoveredPoint.bucket]?.precipitation !== null ? `${formatNumber(hourlyWeatherSeries[hoveredPoint.bucket].precipitation, 1)} mm` : "N/A"}
+                          </span>
+                        ) : null}
+                      </>
+                    ) : null}
                   </div>
                 ) : null}
+              </div>
+              <div className="chart-legend">
+                {showFlowSeries ? <div className="legend-item"><span className="legend-swatch flow" /> Lưu lượng (xe/3ph)</div> : null}
+                {showSpeedSeries ? <div className="legend-item"><span className="legend-swatch speed" /> Tốc độ TB (km/h)</div> : null}
+                {showTemperatureSeries ? <div className="legend-item"><span className="legend-swatch temperature" /> Nhiệt độ (°C)</div> : null}
               </div>
             </div>
           ) : (

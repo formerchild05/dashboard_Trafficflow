@@ -848,9 +848,37 @@ tr:hover td {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
+  align-items: center;
   gap: 10px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.chart-series-filter {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.chart-series-filter label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.chart-series-filter input {
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 .flow-chart-grid {
@@ -885,16 +913,21 @@ tr:hover td {
   stroke-linejoin: round;
 }
 
+.temperature-chart-line {
+  fill: none;
+  stroke: #f59e0b;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .chart-legend {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: rgba(255,255,255,0.85);
-  border: 1px solid rgba(15,23,42,0.06);
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 4px;
   font-size: 13px;
   color: var(--muted);
 }
@@ -914,6 +947,7 @@ tr:hover td {
 
 .legend-swatch.flow { background: #2563eb; }
 .legend-swatch.speed { background: #ef4444; }
+.legend-swatch.temperature { background: #f59e0b; }
 
 .flow-chart-dot {
   fill: #14b8a6;
